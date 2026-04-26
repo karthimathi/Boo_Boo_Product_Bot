@@ -1,25 +1,32 @@
+#!/usr/bin/env python3
 import os
+import sys
 import logging
 import requests
 import asyncio
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 logger = logging.getLogger(__name__)
 
 # Configuration
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 if not TELEGRAM_TOKEN:
-    raise ValueError("TELEGRAM_TOKEN environment variable is not set")
+    error_msg = "TELEGRAM_TOKEN environment variable is not set"
+    logger.error(error_msg)
+    raise ValueError(error_msg)
 
-# GitHub RAW JSON URL - Replace this with your actual URL
-PRODUCTS_URL = os.getenv('PRODUCTS_URL', 'https://github.com/karthimathi/Boo_Boo_Product_Bot/blob/main/sample_Products.json')
+# GitHub RAW JSON URL - Replace with your actual URL
+PRODUCTS_URL = os.getenv('PRODUCTS_URL', 'https://raw.githubusercontent.com/karthimathi/Boo_Boo_Product_Bot/main/products.json')
 
 class ProductBot:
     """Main bot class to handle all commands and product fetching"""
@@ -82,6 +89,7 @@ class ProductBot:
             image_url = product.get('image')
             if not image_url:
                 logger.warning(f"No image URL for product: {product.get('name')}")
+                await update.message.reply_text(f"⚠️ {product.get('name')} - Image not available")
                 return False
                 
             caption = self.format_product_caption(product, category)
@@ -163,12 +171,10 @@ async def show_phones(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     # Send each product
-    success_count = 0
     for product in phones:
-        if await bot_instance.send_product(update, context, product, "phone"):
-            success_count += 0
-            # Small delay to avoid rate limiting
-            await asyncio.sleep(0.5)
+        await bot_instance.send_product(update, context, product, "phone")
+        # Small delay to avoid rate limiting
+        await asyncio.sleep(0.5)
     
     await update.message.reply_text(
         "✅ *All products displayed!*\n"
@@ -239,6 +245,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     """Start the bot"""
     try:
+        logger.info("Initializing bot application...")
+        
         # Create application
         application = Application.builder().token(TELEGRAM_TOKEN).build()
         
@@ -250,9 +258,9 @@ def main():
         # Add error handler
         application.add_error_handler(error_handler)
         
-        logger.info("Bot is starting...")
+        logger.info("Bot is starting and polling for updates...")
         
-        # Start polling
+        # Start polling (this will run until interrupted)
         application.run_polling(allowed_updates=Update.ALL_TYPES)
         
     except Exception as e:
@@ -260,4 +268,5 @@ def main():
         raise
 
 if __name__ == '__main__':
+    logger.info("Starting bot process...")
     main()
