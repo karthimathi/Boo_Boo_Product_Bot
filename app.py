@@ -1,189 +1,263 @@
-"""
-Amazon Affiliate Product Fetching Web App
-Uses Amazon Product Advertising API 5.0 to fetch products based on keywords
-"""
-
 import os
-import uuid
-import hmac
-import hashlib
-import base64
-import urllib.parse
-from datetime import datetime, timezone
-from flask import Flask, render_template, request, jsonify
-from dotenv import load_dotenv
+import logging
 import requests
+import asyncio
+from typing import Dict, List, Optional
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-# Load environment variables from .env file
-load_dotenv()
+# Configure logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
+# Configuration
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+if not TELEGRAM_TOKEN:
+    raise ValueError("TELEGRAM_TOKEN environment variable is not set")
 
-# Amazon PA API Configuration
-ACCESS_KEY = os.getenv('ACCESS_KEY')
-SECRET_KEY = os.getenv('SECRET_KEY')
-ASSOCIATE_TAG = os.getenv('ASSOCIATE_TAG')
-HOST = 'webservices.amazon.in'  # Use 'webservices.amazon.com' for US, 'webservices.amazon.co.uk' for UK, etc.
-REGION = 'us-east-1'  # AWS region for Amazon PA API
-SERVICE = 'ProductAdvertisingAPI'
+# GitHub RAW JSON URL - Replace this with your actual URL
+PRODUCTS_URL = os.getenv('PRODUCTS_URL', 'https://raw.githubusercontent.com/yourusername/yourrepo/main/products.json')
 
-def generate_aws_signature(secret_key, date, region, service, payload):
-    """
-    Generate AWS Signature Version 4 for PA API 5.0
-    """
-    # Create signing key
-    def sign(key, msg):
-        return hmac.new(key, msg.encode('utf-8'), hashlib.sha256).digest()
+class ProductBot:
+    """Main bot class to handle all commands and product fetching"""
     
-    k_secret = f'AWS4{secret_key}'.encode('utf-8')
-    k_date = sign(k_secret, date)
-    k_region = sign(k_date, region)
-    k_service = sign(k_region, service)
-    k_signing = sign(k_service, 'aws4_request')
+    def __init__(self):
+        self.products_cache: Optional[Dict] = None
+        
+    def fetch_products(self) -> Dict:
+        """Fetch product data from GitHub JSON file"""
+        try:
+            logger.info(f"Fetching products from {PRODUCTS_URL}")
+            response = requests.get(PRODUCTS_URL, timeout=10)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            # Validate JSON structure
+            if 'phones' not in data or 'laptops' not in data:
+                raise ValueError("Invalid JSON structure: missing 'phones' or 'laptops' keys")
+                
+            logger.info(f"Successfully fetched {len(data.get('phones', []))} phones and {len(data.get('laptops', []))} laptops")
+            return data
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error fetching products: {e}")
+            return None
+        except ValueError as e:
+            logger.error(f"JSON parsing error: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error: {e}")
+            return None
     
-    # Sign the payload
-    signature = hmac.new(k_signing, payload.encode('utf-8'), hashlib.sha256).hexdigest()
-    return signature
+    def format_product_caption(self, product: Dict, category: str) -> str:
+        """Format product caption with emojis for better conversion"""
+        name = product.get('name', 'N/A')
+        price = product.get('price', 'N/A')
+        link = product.get('link', '#')
+        
+        # Category-specific emojis
+        category_emoji = "📱" if category == "phone" else "💻"
+        
+        caption = f"""
+{category_emoji} *{name}*
 
-def fetch_amazon_products(keyword, count=10):
+💰 *Price:* {price}
+
+🔗 [Click Here to Buy]({link})
+
+⚡ *Limited Stock Available!*
+✨ Shop now and get best deals! 
+
+👉 *Tap the link above to purchase*
+        """
+        return caption.strip()
+    
+    async def send_product(self, update: Update, context: ContextTypes.DEFAULT_TYPE, product: Dict, category: str):
+        """Send a single product with photo and caption"""
+        try:
+            image_url = product.get('image')
+            if not image_url:
+                logger.warning(f"No image URL for product: {product.get('name')}")
+                return False
+                
+            caption = self.format_product_caption(product, category)
+            
+            await update.message.reply_photo(
+                photo=image_url,
+                caption=caption,
+                parse_mode='Markdown'
+            )
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error sending product {product.get('name')}: {e}")
+            await update.message.reply_text(f"❌ Error displaying product: {product.get('name')}")
+            return False
+
+# Bot instance
+bot_instance = ProductBot()
+
+# Command Handlers
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send welcome message with instructions"""
+    welcome_text = """
+🎉 *Welcome to Products Bot!* 🎉
+
+Your one-stop shop for best deals on phones and laptops!
+
+📌 *Available Commands:*
+
+/phones - 📱 Browse all mobile phones
+/laptops - 💻 Browse all laptops
+
+🌟 *Features:*
+• Direct purchase links
+• Best price guarantee
+• Daily updated products
+
+💡 *Tip:* Click on the product link to buy directly!
+
+*Happy Shopping!* 🛍️
     """
-    Fetch products from Amazon Product Advertising API 5.0
-    Returns list of products with title, price, image URL, and affiliate link
-    """
+    await update.message.reply_text(welcome_text, parse_mode='Markdown')
+    logger.info(f"User {update.effective_user.id} started the bot")
+
+async def show_phones(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show all phone products"""
+    user_id = update.effective_user.id
+    logger.info(f"User {user_id} requested phones")
+    
+    # Send typing action
+    await update.message.chat.send_action(action="typing")
+    
+    # Fetch products
+    products_data = bot_instance.fetch_products()
+    
+    if not products_data:
+        await update.message.reply_text(
+            "❌ *Sorry!* Unable to fetch products right now.\n"
+            "Please try again later. 🔄",
+            parse_mode='Markdown'
+        )
+        return
+    
+    phones = products_data.get('phones', [])
+    
+    if not phones:
+        await update.message.reply_text(
+            "📱 *No phones available at the moment!*\n"
+            "Please check back later. 🔄",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Send count message
+    await update.message.reply_text(
+        f"📱 *Found {len(phones)} phones for you!*\n"
+        f"⬇️ Scroll down to see all deals ⬇️\n",
+        parse_mode='Markdown'
+    )
+    
+    # Send each product
+    success_count = 0
+    for product in phones:
+        if await bot_instance.send_product(update, context, product, "phone"):
+            success_count += 0
+            # Small delay to avoid rate limiting
+            await asyncio.sleep(0.5)
+    
+    await update.message.reply_text(
+        "✅ *All products displayed!*\n"
+        "Click on any link to buy now! 🎯",
+        parse_mode='Markdown'
+    )
+
+async def show_laptops(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show all laptop products"""
+    user_id = update.effective_user.id
+    logger.info(f"User {user_id} requested laptops")
+    
+    # Send typing action
+    await update.message.chat.send_action(action="typing")
+    
+    # Fetch products
+    products_data = bot_instance.fetch_products()
+    
+    if not products_data:
+        await update.message.reply_text(
+            "❌ *Sorry!* Unable to fetch products right now.\n"
+            "Please try again later. 🔄",
+            parse_mode='Markdown'
+        )
+        return
+    
+    laptops = products_data.get('laptops', [])
+    
+    if not laptops:
+        await update.message.reply_text(
+            "💻 *No laptops available at the moment!*\n"
+            "Please check back later. 🔄",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Send count message
+    await update.message.reply_text(
+        f"💻 *Found {len(laptops)} laptops for you!*\n"
+        f"⬇️ Scroll down to see all deals ⬇️\n",
+        parse_mode='Markdown'
+    )
+    
+    # Send each product
+    for product in laptops:
+        await bot_instance.send_product(update, context, product, "laptop")
+        # Small delay to avoid rate limiting
+        await asyncio.sleep(0.5)
+    
+    await update.message.reply_text(
+        "✅ *All products displayed!*\n"
+        "Click on any link to buy now! 🎯",
+        parse_mode='Markdown'
+    )
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle errors gracefully"""
+    logger.error(f"Update {update} caused error {context.error}")
+    
+    if update and update.effective_message:
+        await update.effective_message.reply_text(
+            "⚠️ *Something went wrong!*\n"
+            "Please try again later or contact support.\n"
+            "🔄 Use /start to reset the bot.",
+            parse_mode='Markdown'
+        )
+
+def main():
+    """Start the bot"""
     try:
-        # Prepare the API endpoint
-        endpoint = f'https://{HOST}/paapi5/searchitems'
+        # Create application
+        application = Application.builder().token(TELEGRAM_TOKEN).build()
         
-        # Prepare the request body
-        request_body = {
-            'Keywords': keyword,
-            'ItemCount': min(count, 10),  # Max 10 items per request
-            'Resources': [
-                'ItemInfo.Title',
-                'Offers.Listings.Price',
-                'Images.Primary.Medium',
-                'DetailPageURL'
-            ]
-        }
+        # Add command handlers
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("phones", show_phones))
+        application.add_handler(CommandHandler("laptops", show_laptops))
         
-        # Convert request body to JSON string
-        payload = json.dumps(request_body)
+        # Add error handler
+        application.add_error_handler(error_handler)
         
-        # Generate timestamp
-        timestamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
-        date = timestamp[:8]
+        logger.info("Bot is starting...")
         
-        # Create canonical request
-        canonical_uri = '/paapi5/searchitems'
-        canonical_querystring = ''
-        canonical_headers = f'host:{HOST}\nx-amz-date:{timestamp}\n'
-        signed_headers = 'host;x-amz-date'
-        payload_hash = hashlib.sha256(payload.encode('utf-8')).hexdigest()
+        # Start polling
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
         
-        canonical_request = f'POST\n{canonical_uri}\n{canonical_querystring}\n{canonical_headers}\n{signed_headers}\n{payload_hash}'
-        
-        # Create string to sign
-        algorithm = 'AWS4-HMAC-SHA256'
-        credential_scope = f'{date}/{REGION}/{SERVICE}/aws4_request'
-        string_to_sign = f'{algorithm}\n{timestamp}\n{credential_scope}\n{hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()}'
-        
-        # Generate signature
-        signature = generate_aws_signature(SECRET_KEY, date, REGION, SERVICE, string_to_sign)
-        
-        # Create authorization header
-        authorization_header = f'{algorithm} Credential={ACCESS_KEY}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}'
-        
-        # Make the API request
-        headers = {
-            'Content-Type': 'application/json',
-            'X-Amz-Date': timestamp,
-            'Authorization': authorization_header
-        }
-        
-        response = requests.post(endpoint, headers=headers, data=payload)
-        
-        # Check if request was successful
-        if response.status_code != 200:
-            error_data = response.json()
-            error_msg = error_data.get('Errors', [{}])[0].get('Message', 'Unknown error')
-            raise Exception(f'API Error: {error_msg}')
-        
-        data = response.json()
-        
-        # Parse the response
-        products = []
-        items = data.get('SearchResult', {}).get('Items', [])
-        
-        for item in items[:count]:
-            # Extract product details
-            title = item.get('ItemInfo', {}).get('Title', {}).get('DisplayValue', 'No title available')
-            
-            # Extract price
-            price_info = item.get('Offers', {}).get('Listings', [{}])[0].get('Price', {})
-            if price_info:
-                amount = price_info.get('Amount', 0)
-                currency = price_info.get('Currency', 'INR')
-                price = f'{currency} {amount/100:.2f}' if amount else 'Price not available'
-            else:
-                price = 'Price not available'
-            
-            # Extract image URL
-            image_url = item.get('Images', {}).get('Primary', {}).get('Medium', {}).get('URL', '')
-            
-            # Get detail page URL (affiliate link)
-            affiliate_link = item.get('DetailPageURL', '')
-            
-            # Add tracking tag to affiliate link
-            if affiliate_link and ASSOCIATE_TAG:
-                parsed_url = urllib.parse.urlparse(affiliate_link)
-                query_params = urllib.parse.parse_qs(parsed_url.query)
-                query_params['tag'] = [ASSOCIATE_TAG]
-                new_query = urllib.parse.urlencode(query_params, doseq=True)
-                affiliate_link = urllib.parse.urlunparse(parsed_url._replace(query=new_query))
-            
-            products.append({
-                'title': title,
-                'price': price,
-                'image_url': image_url,
-                'affiliate_link': affiliate_link
-            })
-        
-        return products
-    
-    except requests.exceptions.RequestException as e:
-        raise Exception(f'Network error: {str(e)}')
     except Exception as e:
-        raise Exception(f'Failed to fetch products: {str(e)}')
-
-@app.route('/')
-def index():
-    """
-    Render the main page
-    """
-    return render_template('index.html')
-
-@app.route('/search', methods=['POST'])
-def search():
-    """
-    Handle product search request
-    """
-    try:
-        data = request.get_json()
-        keyword = data.get('keyword', '').strip()
-        
-        if not keyword:
-            return jsonify({'error': 'Please enter a search keyword'}), 400
-        
-        # Fetch products from Amazon API
-        products = fetch_amazon_products(keyword, count=8)
-        
-        if not products:
-            return jsonify({'message': 'No products found for your search', 'products': []}), 200
-        
-        return jsonify({'products': products, 'count': len(products)}), 200
-    
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Failed to start bot: {e}")
+        raise
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    main()
