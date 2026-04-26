@@ -19,7 +19,7 @@ if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN environment variable is not set")
 
 # GitHub RAW JSON URL - Replace this with your actual URL
-PRODUCTS_URL = os.getenv('PRODUCTS_URL', 'https://raw.githubusercontent.com/yourusername/yourrepo/main/products.json')
+PRODUCTS_URL = os.getenv('PRODUCTS_URL', 'https://github.com/karthimathi/Boo_Boo_Product_Bot/blob/main/sample_Products.json')
 
 class ProductBot:
     """Main bot class to handle all commands and product fetching"""
